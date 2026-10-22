@@ -9,6 +9,8 @@ in real fullscreen at the native panel resolution (3024x1890 on a 14" MacBook Pr
 Tested on a MacBook Pro 14" (M4 Pro, 24 GB), macOS 27.0.1, current Steam client, October 2026.
 Nothing in the game binary is modified; everything is reversible.
 
+The same content as a Steam guide: https://steamcommunity.com/sharedfiles/filedetails/?id=3824868534
+
 ## The three problems
 
 ### 1. Crash in windowed mode: the Steam Overlay
