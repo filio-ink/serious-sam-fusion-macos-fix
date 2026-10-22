@@ -12,6 +12,9 @@ D="$(dirname "$0")"
 LOGDIR="$D/../../Log"
 echo "=== $(date '+%F %T') start: $*" >> "$LOGDIR/stderr.log"
 export FUSIONFIX_LOG="$LOGDIR/fusionfix.log"
+# On a MacBook with a notch the fullscreen picture covers the whole panel (the notch hides a sliver at the top).
+# Uncomment the next line if you prefer the picture to stop below the notch (AppKit default, 16:10 area only):
+# export FUSIONFIX_NO_NOTCH=1
 if [ -f "$D/fusionfix.dylib" ]; then
   export DYLD_INSERT_LIBRARIES="$D/fusionfix.dylib"
 else
