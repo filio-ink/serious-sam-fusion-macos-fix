@@ -88,6 +88,11 @@ a binary from someone you don't know; that is the whole point of keeping it this
 To start in fullscreen, pick Fullscreen in Graphics Options (or set `gfx_bFullScreen = 1;` plus
 `gfx_pixResWidth` / `gfx_pixResHeight` in the `.ini`). Remove any `+gfx_bFullScreen 0` launch option you added earlier.
 
+On a MacBook with a notch you can use the whole panel (3024x1964 on the 14"): the library extends the fullscreen
+window over the top safe area, so the picture is not cut off at the bottom and the notch just hides a sliver of
+the top strip. Set `FUSIONFIX_NO_NOTCH=1` in the wrapper if you prefer AppKit's safe-area behaviour, or simply pick
+a 16:10 mode such as 3024x1890.
+
 ## Uninstall
 
 Delete `Sam2017` (the wrapper) and `fusionfix.dylib`, rename `Sam2017_real` back to `Sam2017`.

@@ -83,6 +83,28 @@ static void my_setLayer(id self, SEL _cmd, id layer) {
     if (isSE && [layer isKindOfClass:[CAMetalLayer class]]) applyScale(layer, self);
 }
 
+// On a Mac with a notch, AppKit sizes the fullscreen window to the screen minus the top safe area
+// (3024x1900 instead of 3024x1964 on a 14" MacBook Pro) while the engine renders the full display mode,
+// so the bottom of the picture is cut off. Let the window cover the whole panel; the notch simply hides
+// a bit of the top strip. Set FUSIONFIX_NO_NOTCH=1 to keep AppKit's safe-area behaviour.
+static NSRect (*orig_constrain)(id, SEL, NSRect, id);
+static NSRect my_constrain(id self, SEL _cmd, NSRect r, id screen) {
+    if (strcmp(class_getName([self class]), "_NSFullScreenWindow") == 0 && !getenv("FUSIONFIX_NO_NOTCH")) return r;
+    return orig_constrain(self, _cmd, r, screen);
+}
+static void coverWholeScreen(NSWindow *w) {
+    if (!w || getenv("FUSIONFIX_NO_NOTCH")) return;
+    NSScreen *scr = w.screen ?: [NSScreen mainScreen];
+    NSRect full = scr.frame;
+    if (NSEqualRects(w.frame, full)) return;
+    LOG("fullscreen window is %.0fx%.0f@%.0f,%.0f, screen is %.0fx%.0f (safe-area top %.0f): extending to the whole panel",
+        w.frame.size.width, w.frame.size.height, w.frame.origin.x, w.frame.origin.y, full.size.width, full.size.height,
+        scr.safeAreaInsets.top);
+    [w setFrame:full display:YES];
+    LOG("  -> window now %.0fx%.0f@%.0f,%.0f, view bounds %.0fx%.0f", w.frame.size.width, w.frame.size.height,
+        w.frame.origin.x, w.frame.origin.y, w.contentView.bounds.size.width, w.contentView.bounds.size.height);
+}
+
 static BOOL (*orig_enterFS)(id, SEL, id, id);
 static BOOL my_enterFS(id self, SEL _cmd, id screen, id opts) {
     LOG("enterFullScreenMode: view=%p %s", self, class_getName([self class]));
@@ -91,6 +113,7 @@ static BOOL my_enterFS(id self, SEL _cmd, id screen, id opts) {
     NSWindow *w = [(NSView *)self window];
     LOG("  -> %d window=%p %s frame=%.0fx%.0f layer=%p scale=%.1f", r, w, w ? class_getName([w class]) : "-",
         w.frame.size.width, w.frame.size.height, [(NSView *)self layer], w ? w.backingScaleFactor : 0);
+    coverWholeScreen(w);
     attachMetal(self, "enterFullScreenMode");
     return r;
 }
@@ -136,10 +159,11 @@ __attribute__((constructor)) static void fusionfix_init(void) {
     if (p) gLog = fopen(p, "a");
     const char *s = getenv("FUSIONFIX_SCALE");
     if (s) gScale = atof(s);
-    LOG("=== fusionfix 1.0 loaded pid=%d scale=%.2f", getpid(), gScale);
+    LOG("=== fusionfix 1.1 loaded pid=%d scale=%.2f", getpid(), gScale);
     orig_nextDrawable = (id (*)(id, SEL))hook(objc_getClass("CAMetalLayer"), @selector(nextDrawable), (IMP)my_nextDrawable);
     orig_setDevice = (void (*)(id, SEL, id))hook(objc_getClass("CAMetalLayer"), @selector(setDevice:), (IMP)my_setDevice);
     orig_setLayer = (void (*)(id, SEL, id))hook(objc_getClass("NSView"), @selector(setLayer:), (IMP)my_setLayer);
     orig_enterFS = (BOOL (*)(id, SEL, id, id))hook(objc_getClass("NSView"), @selector(enterFullScreenMode:withOptions:), (IMP)my_enterFS);
     orig_exitFS = (void (*)(id, SEL, id))hook(objc_getClass("NSView"), @selector(exitFullScreenModeWithOptions:), (IMP)my_exitFS);
+    orig_constrain = (NSRect (*)(id, SEL, NSRect, id))hook(objc_getClass("NSWindow"), @selector(constrainFrameRect:toScreen:), (IMP)my_constrain);
 }
