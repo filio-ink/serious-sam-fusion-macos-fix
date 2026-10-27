@@ -1,169 +1,211 @@
-// fusionfix.m - Serious Sam Fusion 2017 (Steam, build 440323 from June 2019, x86_64 under Rosetta 2)
-// fixes for current macOS. Injected into the game by the Bin/x64/Sam2017 wrapper via DYLD_INSERT_LIBRARIES.
-//
-// Problem: the engine still uses -[NSView enterFullScreenMode:withOptions:]. On current macOS the view inside
-// the _NSFullScreenWindow gets a default backing layer before the engine attaches its own CAMetalLayer, so the
-// engine's layer never ends up on screen (bounds 0x0, no superlayer), nextDrawable returns nil and Metal aborts
-// with "-[_MTLCommandBuffer presentDrawable:] failed assertion drawable must not be nil"
-// (the engine log shows "Failed creating pipeline state: rasterSampleCount (0) is not supported by device").
-//
-// Fix: remember the engine's CAMetalLayer (it calls setDevice: on it) and attach it to the fullscreen view
-// as soon as both exist. Nothing in the game binary is modified.
-//
-// Build:
-//   xcrun clang -arch x86_64 -dynamiclib -fno-objc-arc -mmacosx-version-min=10.14 -O2 \
-//     -framework Foundation -framework AppKit -framework Metal -framework QuartzCore -o fusionfix.dylib fusionfix.m
-//
-// Env: FUSIONFIX_LOG=<file>   log what happens (set by the wrapper)
-//      FUSIONFIX_SCALE=<f>    experimental: Retina scale for windowed mode. Does NOT work with this engine
-//                             (it renders into one quadrant), kept only for people who want to experiment.
+// Serious Sam Fusion 2017 (Steam build 440323, x86_64 under Rosetta 2).
+// Build with ./build.sh. ARC is required for zeroing weak object references.
+// FUSIONFIX_LOG=1 enables diagnostics on stderr; no log files are opened.
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <dispatch/dispatch.h>
+#include <errno.h>
+#include <math.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-static FILE *gLog = NULL;
+#if !__has_feature(objc_arc)
+#error "fusionfix requires ARC; use ./build.sh"
+#endif
+
+static bool gLogging;
+static bool enabled(const char *name) {
+    const char *value = getenv(name);
+    return value && strcmp(value, "1") == 0;
+}
+static void LOG(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void LOG(const char *fmt, ...) {
-    if (!gLog) return;
-    va_list ap; va_start(ap, fmt); vfprintf(gLog, fmt, ap); va_end(ap);
-    fputc('\n', gLog); fflush(gLog);
-}
-static IMP hook(Class cls, SEL sel, IMP newImp) {
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) { LOG("hook: %s lacks %s", class_getName(cls), sel_getName(sel)); return NULL; }
-    IMP orig = method_getImplementation(m);
-    class_replaceMethod(cls, sel, newImp, method_getTypeEncoding(m));
-    return orig;
+    if (!gLogging) return;
+    // Use the launcher's existing descriptor, never a path supplied by the environment.
+    flockfile(stderr);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+    funlockfile(stderr);
 }
 
-static CAMetalLayer *gMetal = nil;      // the engine's CAMetalLayer (seen in setDevice:)
-static NSView *gFSView = nil;           // the view passed to enterFullScreenMode:
-static double gScale = 0;               // FUSIONFIX_SCALE (0 = leave alone)
+// Access these only on the main thread. Weak references zero on destruction;
+// each operation takes a strong local snapshot for its entire use of the object.
+static __weak CAMetalLayer *gMetal;
+static __weak NSView *gFSView;
+static double gScale;
+static atomic_bool gRepairPending;
+static atomic_ulong gCalls, gNil;
 
-static void applyScale(CAMetalLayer *l, NSView *v) {
+static bool isEngineView(id view) {
+    return strcmp(class_getName([view class]), "SEView") == 0;
+}
+
+static void applyScale(CAMetalLayer *layer, NSView *view) {
     if (gScale <= 0) return;
-    NSWindow *w = v.window;
-    if (w && w.backingScaleFactor <= 1.0) return;   // captured fullscreen: points == pixels already
-    l.contentsScale = gScale;
-    l.drawableSize = CGSizeMake(v.bounds.size.width * gScale, v.bounds.size.height * gScale);
-    LOG("applyScale: layer=%p scale=%.2f drawable=%.0fx%.0f", l, gScale, l.drawableSize.width, l.drawableSize.height);
+    NSWindow *window = view.window;
+    if (window && window.backingScaleFactor <= 1.0) return;
+    layer.contentsScale = gScale;
+    layer.drawableSize = CGSizeMake(view.bounds.size.width * gScale, view.bounds.size.height * gScale);
 }
 
 static void (*orig_setLayer)(id, SEL, id);
-static void attachMetal(NSView *v, const char *why) {
-    if (!gMetal || !v) return;
-    if (gMetal.superlayer || v.layer == gMetal) { LOG("attachMetal(%s): already attached", why); return; }
-    gMetal.frame = v.bounds;
-    orig_setLayer(v, @selector(setLayer:), gMetal);
-    [v setWantsLayer:YES];
-    applyScale(gMetal, v);
-    LOG("attachMetal(%s): view=%p %s bounds=%.0fx%.0f -> layer=%p drawable=%.0fx%.0f scale=%.2f", why, v,
-        class_getName([v class]), v.bounds.size.width, v.bounds.size.height, gMetal,
-        gMetal.drawableSize.width, gMetal.drawableSize.height, gMetal.contentsScale);
+static void attachMetal(NSView *view, CAMetalLayer *layer, const char *why) {
+    if (![NSThread isMainThread] || !view || !layer) return;
+    if (layer.superlayer || view.layer == layer) return;
+    layer.frame = view.bounds;
+    orig_setLayer(view, @selector(setLayer:), layer);
+    [view setWantsLayer:YES];
+    applyScale(layer, view);
+    LOG("attachMetal(%s): bounds=%.0fx%.0f drawable=%.0fx%.0f", why,
+        view.bounds.size.width, view.bounds.size.height, layer.drawableSize.width, layer.drawableSize.height);
 }
 
-static void my_setLayer(id self, SEL _cmd, id layer) {
-    BOOL isSE = strcmp(class_getName([self class]), "SEView") == 0;   // SEView = the engine's render view
-    if (isSE) LOG("setLayer: SEView=%p layer=%p(%s) win=%p fsview=%p", self, layer,
-                  layer ? class_getName([layer class]) : "nil", [(NSView *)self window], gFSView);
-    // AppKit wants to give the engine's view a plain backing layer while the engine's Metal layer is still
-    // detached: put the Metal layer there instead.
-    if (isSE && layer && ![layer isKindOfClass:[CAMetalLayer class]] && gMetal && !gMetal.superlayer) {
-        LOG("setLayer: substituting the engine's CAMetalLayer for %s", class_getName([layer class]));
-        attachMetal(self, "setLayer-substitute");
+static void rememberMetal(CAMetalLayer *layer) {
+    if (![NSThread isMainThread] || !layer) return;
+    gMetal = layer;
+    NSView *view = gFSView;
+    attachMetal(view, layer, "render-layer");
+}
+
+static void requestMetalRepair(CAMetalLayer *layer) {
+    if ([NSThread isMainThread]) {
+        rememberMetal(layer);
         return;
     }
-    orig_setLayer(self, _cmd, layer);
-    if (isSE && [layer isKindOfClass:[CAMetalLayer class]]) applyScale(layer, self);
+    // Never synchronously wait for the main thread: it may be waiting for the
+    // renderer. Coalesce repairs and don't keep a retired render layer alive.
+    bool expected = false;
+    if (!atomic_compare_exchange_strong(&gRepairPending, &expected, true)) return;
+    __weak CAMetalLayer *pendingLayer = layer;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        atomic_store(&gRepairPending, false);
+        CAMetalLayer *current = pendingLayer;
+        rememberMetal(current);
+    });
 }
 
-// On a Mac with a notch, AppKit sizes the fullscreen window to the screen minus the top safe area
-// (3024x1900 instead of 3024x1964 on a 14" MacBook Pro) while the engine renders the full display mode,
-// so the bottom of the picture is cut off. Let the window cover the whole panel; the notch simply hides
-// a bit of the top strip. Set FUSIONFIX_NO_NOTCH=1 to keep AppKit's safe-area behaviour.
-static NSRect (*orig_constrain)(id, SEL, NSRect, id);
-static NSRect my_constrain(id self, SEL _cmd, NSRect r, id screen) {
-    if (strcmp(class_getName([self class]), "_NSFullScreenWindow") == 0 && !getenv("FUSIONFIX_NO_NOTCH")) return r;
-    return orig_constrain(self, _cmd, r, screen);
+static void my_setLayer(id self, SEL cmd, id layer) {
+    if ([NSThread isMainThread] && isEngineView(self)) {
+        CAMetalLayer *metal = gMetal;
+        if (layer && ![layer isKindOfClass:[CAMetalLayer class]] && metal && !metal.superlayer) {
+            attachMetal(self, metal, "setLayer-substitute");
+            return;
+        }
+    }
+    orig_setLayer(self, cmd, layer);
+    if ([NSThread isMainThread] && isEngineView(self) && [layer isKindOfClass:[CAMetalLayer class]])
+        applyScale(layer, self);
 }
-static void coverWholeScreen(NSWindow *w) {
-    if (!w || getenv("FUSIONFIX_NO_NOTCH")) return;
-    NSScreen *scr = w.screen ?: [NSScreen mainScreen];
-    NSRect full = scr.frame;
-    if (NSEqualRects(w.frame, full)) return;
-    LOG("fullscreen window is %.0fx%.0f@%.0f,%.0f, screen is %.0fx%.0f (safe-area top %.0f): extending to the whole panel",
-        w.frame.size.width, w.frame.size.height, w.frame.origin.x, w.frame.origin.y, full.size.width, full.size.height,
-        scr.safeAreaInsets.top);
-    [w setFrame:full display:YES];
-    LOG("  -> window now %.0fx%.0f@%.0f,%.0f, view bounds %.0fx%.0f", w.frame.size.width, w.frame.size.height,
-        w.frame.origin.x, w.frame.origin.y, w.contentView.bounds.size.width, w.contentView.bounds.size.height);
+
+static NSRect (*orig_constrain)(id, SEL, NSRect, id);
+static NSRect my_constrain(id self, SEL cmd, NSRect rect, id screen) {
+    if ([NSThread isMainThread] && !enabled("FUSIONFIX_NO_NOTCH") &&
+        strcmp(class_getName([self class]), "_NSFullScreenWindow") == 0) return rect;
+    return orig_constrain(self, cmd, rect, screen);
+}
+
+static void coverWholeScreen(NSWindow *window) {
+    if (!window || enabled("FUSIONFIX_NO_NOTCH")) return;
+    NSScreen *screen = window.screen ?: [NSScreen mainScreen];
+    if (!screen || NSEqualRects(window.frame, screen.frame)) return;
+    [window setFrame:screen.frame display:YES];
 }
 
 static BOOL (*orig_enterFS)(id, SEL, id, id);
-static BOOL my_enterFS(id self, SEL _cmd, id screen, id opts) {
-    LOG("enterFullScreenMode: view=%p %s", self, class_getName([self class]));
-    BOOL r = orig_enterFS(self, _cmd, screen, opts);
-    gFSView = self;
-    NSWindow *w = [(NSView *)self window];
-    LOG("  -> %d window=%p %s frame=%.0fx%.0f layer=%p scale=%.1f", r, w, w ? class_getName([w class]) : "-",
-        w.frame.size.width, w.frame.size.height, [(NSView *)self layer], w ? w.backingScaleFactor : 0);
-    coverWholeScreen(w);
-    attachMetal(self, "enterFullScreenMode");
-    return r;
+static BOOL my_enterFS(id self, SEL cmd, id screen, id options) {
+    BOOL result = orig_enterFS(self, cmd, screen, options);
+    if (!result || ![NSThread isMainThread] || !isEngineView(self)) return result;
+    NSView *view = self;
+    gFSView = view;
+    coverWholeScreen(view.window);
+    CAMetalLayer *metal = gMetal;
+    attachMetal(view, metal, "enterFullScreenMode");
+    return result;
 }
 
 static void (*orig_exitFS)(id, SEL, id);
-static void my_exitFS(id self, SEL _cmd, id opts) {
-    LOG("exitFullScreenMode: view=%p", self);
-    orig_exitFS(self, _cmd, opts);
-    gFSView = nil;
+static void my_exitFS(id self, SEL cmd, id options) {
+    // Clear before AppKit can re-enter a hook while tearing down fullscreen.
+    if ([NSThread isMainThread] && gFSView == self) gFSView = nil;
+    orig_exitFS(self, cmd, options);
 }
 
 static void (*orig_setDevice)(id, SEL, id);
-static void my_setDevice(id self, SEL _cmd, id dev) {
-    orig_setDevice(self, _cmd, dev);
-    gMetal = self;
-    LOG("CAMetalLayer setDevice: layer=%p dev=%s super=%p bounds=%.0fx%.0f fsview=%p", self,
-        dev ? [[dev name] UTF8String] : "nil", [(CALayer *)self superlayer],
-        [(CALayer *)self bounds].size.width, [(CALayer *)self bounds].size.height, gFSView);
-    // The engine creates the layer after entering fullscreen: attach it now.
-    if (gFSView && ![(CALayer *)self superlayer]) attachMetal(gFSView, "setDevice-late");
+static void my_setDevice(id self, SEL cmd, id device) {
+    orig_setDevice(self, cmd, device);
+    if (device) requestMetalRepair(self);
 }
 
 static id (*orig_nextDrawable)(id, SEL);
-static unsigned long gCalls = 0, gNil = 0;
-static id my_nextDrawable(id self, SEL _cmd) {
-    CAMetalLayer *l = self;
-    if (!l.superlayer && gFSView) attachMetal(gFSView, "nextDrawable-rescue");
-    id d = orig_nextDrawable(self, _cmd);
-    gCalls++;
-    if (!d) {
-        gNil++;
-        if (gNil <= 3 || gNil % 500 == 0)
-            LOG("nextDrawable NIL #%lu layer=%p super=%p bounds=%.0fx%.0f drawable=%.0fx%.0f", gNil, l, l.superlayer,
-                l.bounds.size.width, l.bounds.size.height, l.drawableSize.width, l.drawableSize.height);
-    } else if (gCalls == 1 || gCalls % 3000 == 0) {
-        LOG("nextDrawable ok #%lu drawable=%.0fx%.0f scale=%.2f", gCalls, l.drawableSize.width, l.drawableSize.height, l.contentsScale);
+static id my_nextDrawable(id self, SEL cmd) {
+    CAMetalLayer *layer = self;
+    if (!layer.superlayer) requestMetalRepair(layer);
+    id drawable = orig_nextDrawable(self, cmd);
+    unsigned long calls = atomic_fetch_add(&gCalls, 1) + 1;
+    if (!drawable) {
+        unsigned long nils = atomic_fetch_add(&gNil, 1) + 1;
+        if (nils <= 3 || nils % 500 == 0) LOG("nextDrawable NIL #%lu", nils);
+    } else if (calls == 1 || calls % 3000 == 0) {
+        LOG("nextDrawable ok #%lu", calls);
     }
-    return d;
+    return drawable;
 }
 
-__attribute__((constructor)) static void fusionfix_init(void) {
-    const char *p = getenv("FUSIONFIX_LOG");
-    if (p) gLog = fopen(p, "a");
-    const char *s = getenv("FUSIONFIX_SCALE");
-    if (s) gScale = atof(s);
-    LOG("=== fusionfix 1.1 loaded pid=%d scale=%.2f", getpid(), gScale);
-    orig_nextDrawable = (id (*)(id, SEL))hook(objc_getClass("CAMetalLayer"), @selector(nextDrawable), (IMP)my_nextDrawable);
-    orig_setDevice = (void (*)(id, SEL, id))hook(objc_getClass("CAMetalLayer"), @selector(setDevice:), (IMP)my_setDevice);
-    orig_setLayer = (void (*)(id, SEL, id))hook(objc_getClass("NSView"), @selector(setLayer:), (IMP)my_setLayer);
-    orig_enterFS = (BOOL (*)(id, SEL, id, id))hook(objc_getClass("NSView"), @selector(enterFullScreenMode:withOptions:), (IMP)my_enterFS);
-    orig_exitFS = (void (*)(id, SEL, id))hook(objc_getClass("NSView"), @selector(exitFullScreenModeWithOptions:), (IMP)my_exitFS);
-    orig_constrain = (NSRect (*)(id, SEL, NSRect, id))hook(objc_getClass("NSWindow"), @selector(constrainFrameRect:toScreen:), (IMP)my_constrain);
+static IMP hook(Class cls, SEL selector, IMP replacement) {
+    Method method = class_getInstanceMethod(cls, selector);
+    IMP original = method_getImplementation(method);
+    class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
+    return original;
 }
+
+#ifndef FUSIONFIX_TESTING
+__attribute__((constructor)) static void fusionfix_init(void) {
+    // DYLD variables propagate to child processes; don't alter helper applications.
+    if (strcmp(getprogname(), "Sam2017_real") != 0) return;
+    gLogging = enabled("FUSIONFIX_LOG");
+    const char *scale = getenv("FUSIONFIX_SCALE");
+    if (scale) {
+        char *end = NULL;
+        errno = 0;
+        double value = strtod(scale, &end);
+        if (!errno && end != scale && *end == '\0' && isfinite(value) && value > 0 && value <= 4)
+            gScale = value;
+        else
+            LOG("ignoring invalid FUSIONFIX_SCALE (expected a finite number in (0, 4])");
+    }
+
+    Class metal = objc_getClass("CAMetalLayer");
+    Class view = objc_getClass("NSView");
+    Class window = objc_getClass("NSWindow");
+    struct { Class cls; SEL selector; } required[] = {
+        {metal, @selector(nextDrawable)}, {metal, @selector(setDevice:)},
+        {view, @selector(setLayer:)}, {view, @selector(enterFullScreenMode:withOptions:)},
+        {view, @selector(exitFullScreenModeWithOptions:)}, {window, @selector(constrainFrameRect:toScreen:)}
+    };
+    // Validate the complete set before changing any methods.
+    for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++) {
+        if (!required[i].cls || !class_getInstanceMethod(required[i].cls, required[i].selector)) {
+            LOG("fusionfix disabled: required graphics API is unavailable");
+            return;
+        }
+    }
+    orig_nextDrawable = (id (*)(id, SEL))hook(metal, @selector(nextDrawable), (IMP)my_nextDrawable);
+    orig_setDevice = (void (*)(id, SEL, id))hook(metal, @selector(setDevice:), (IMP)my_setDevice);
+    orig_setLayer = (void (*)(id, SEL, id))hook(view, @selector(setLayer:), (IMP)my_setLayer);
+    orig_enterFS = (BOOL (*)(id, SEL, id, id))hook(view, @selector(enterFullScreenMode:withOptions:), (IMP)my_enterFS);
+    orig_exitFS = (void (*)(id, SEL, id))hook(view, @selector(exitFullScreenModeWithOptions:), (IMP)my_exitFS);
+    orig_constrain = (NSRect (*)(id, SEL, NSRect, id))hook(window, @selector(constrainFrameRect:toScreen:), (IMP)my_constrain);
+    LOG("fusionfix 1.2 loaded");
+}
+#endif
