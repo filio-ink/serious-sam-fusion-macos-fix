@@ -94,9 +94,11 @@ int main(void) {
             __attribute__((objc_precise_lifetime)) TestLayer *retired = [TestLayer new];
             __weak TestLayer *weakRetired = retired;
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
-                TestLayer *current = weakRetired;
-                assert(current != nil);
-                requestMetalRepair((CAMetalLayer *)current);
+                @autoreleasepool {
+                    TestLayer *current = weakRetired;
+                    assert(current != nil);
+                    requestMetalRepair((CAMetalLayer *)current);
+                }
                 dispatch_semaphore_signal(queued);
             });
             assert(dispatch_semaphore_wait(queued, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0);

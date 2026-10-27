@@ -10,6 +10,8 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[1]
 BUILD = REPO / 'build'
+SDK_PATH = os.environ.get('SDKROOT') or subprocess.check_output(
+    ['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip()
 
 
 def snapshot(directory):
@@ -30,8 +32,15 @@ class InstallerTests(unittest.TestCase):
         self.tools = self.root / 'tools'
         self.tools.mkdir()
         self.env = dict(os.environ, PATH=str(self.tools) + os.pathsep + os.environ['PATH'])
+        # Exercise SDK discovery even when the developer selected SDKROOT locally.
+        self.env.pop('SDKROOT', None)
+        self.env['TEST_SDK_PATH'] = SDK_PATH
         self.env['TEST_LIBRARY'] = str(BUILD / 'fusionfix.dylib')
         self.script('xcrun', '''#!/bin/sh
+if [ "$1" = --sdk ] && [ "$2" = macosx ] && [ "$3" = --show-sdk-path ]; then
+  printf '%s\\n' "$TEST_SDK_PATH"
+  exit 0
+fi
 [ "${FAIL_COMPILE:-0}" != 1 ] || exit 42
 [ "$1" = clang ] || exit 43
 while [ "$#" -gt 0 ]; do
@@ -77,6 +86,7 @@ exec /bin/mv "$@"
 
     def test_real_compiler_install_and_uninstall(self):
         self.env['PATH'] = os.environ['PATH']
+        self.env['SDKROOT'] = SDK_PATH
         self.assertEqual(self.install().returncode, 0)
         result = self.install('--uninstall')
         self.assertEqual(result.returncode, 0, result.stderr)
