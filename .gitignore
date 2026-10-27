@@ -1,0 +1,4 @@
+*.dylib
+*.dSYM/
+build/
+__pycache__/
