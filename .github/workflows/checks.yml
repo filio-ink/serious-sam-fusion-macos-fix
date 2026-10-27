@@ -1,0 +1,22 @@
+name: macOS checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and regression tests
+        run: ./tests/run.sh
+      - name: Clang static analysis
+        run: >-
+          xcrun clang --analyze -arch x86_64 -fobjc-arc -fblocks
+          -isysroot "$(xcrun --sdk macosx --show-sdk-path)"
+          -mmacosx-version-min=10.14 -Wall -Wextra -Werror
+          -Xanalyzer -analyzer-output=text fusionfix.m -o build/analysis.plist
