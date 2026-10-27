@@ -1,23 +1,21 @@
 #!/bin/sh
-# Serious Sam Fusion 2017 (Steam, macOS) launcher wrapper.
-# Install: in Bin/x64 rename the original executable "Sam2017" to "Sam2017_real", save this file as "Sam2017", chmod 755.
-#
-# 1) The Steam Overlay (gameoverlayrenderer.dylib) crashes this 2019 build whenever the Metal layer is resized.
-#    Steam injects it with DYLD_INSERT_LIBRARIES, so we replace that variable before starting the real binary.
-# 2) fusionfix.dylib (built from fusionfix.m) makes fullscreen work again on current macOS and logs to Log/fusionfix.log.
-#    If the dylib is missing the game still starts, just without the overlay (windowed mode only).
-#
-# Uninstall: delete this file and fusionfix.dylib, rename Sam2017_real back to Sam2017 (or "Verify integrity of game files").
-D="$(dirname "$0")"
-LOGDIR="$D/../../Log"
-echo "=== $(date '+%F %T') start: $*" >> "$LOGDIR/stderr.log"
-export FUSIONFIX_LOG="$LOGDIR/fusionfix.log"
-# On a MacBook with a notch the fullscreen picture covers the whole panel (the notch hides a sliver at the top).
-# Uncomment the next line if you prefer the picture to stop below the notch (AppKit default, 16:10 area only):
-# export FUSIONFIX_NO_NOTCH=1
+# Installed by install.sh. Remove Steam's overlay before running any child process.
+unset DYLD_INSERT_LIBRARIES
+D=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && pwd -P) || exit 1
+case "$D" in
+  *:*) echo 'fusionfix: the game path must not contain a colon (dyld path separator).' >&2; exit 1 ;;
+esac
+if [ ! -f "$D/Sam2017_real" ] || [ ! -x "$D/Sam2017_real" ] || [ -L "$D/Sam2017_real" ]; then
+  echo 'fusionfix: original executable missing or unsafe; restore it using install.sh --uninstall or Steam verification.' >&2
+  exit 1
+fi
+if [ -L "$D/fusionfix.dylib" ]; then
+  echo 'fusionfix: refusing a symbolic link in place of fusionfix.dylib.' >&2
+  exit 1
+fi
 if [ -f "$D/fusionfix.dylib" ]; then
   export DYLD_INSERT_LIBRARIES="$D/fusionfix.dylib"
-else
-  unset DYLD_INSERT_LIBRARIES
 fi
-exec "$D/Sam2017_real" "$@" 2>> "$LOGDIR/stderr.log"
+# No file redirects: Steam owns stderr. FUSIONFIX_LOG=1 opts into diagnostics.
+# FUSIONFIX_NO_NOTCH=1 preserves AppKit's default fullscreen safe area.
+exec "$D/Sam2017_real" "$@"
