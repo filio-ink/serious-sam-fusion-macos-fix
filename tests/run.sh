@@ -20,3 +20,7 @@ xcrun clang -isysroot "$SDK_PATH" -fobjc-arc -fblocks -O2 -Wall -Wextra -Wformat
 xcrun clang -isysroot "$SDK_PATH" -fobjc-arc -Wall -Wextra -Werror \
   -framework Foundation -framework QuartzCore tests/helper_guard.m -o build/helper-guard
 ./build/helper-guard "$REPO_DIR/build/fusionfix-native.dylib"
+for executable in Sam2017_real Sam2017_Unrestricted_real; do
+  cp build/helper-guard "build/$executable"
+  "./build/$executable" "$REPO_DIR/build/fusionfix-native.dylib" expect-hooks
+done

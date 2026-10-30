@@ -208,6 +208,69 @@ exit 42
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('symbolic link', result.stderr)
 
+    def add_unrestricted_original(self):
+        path = self.binary / 'Sam2017_Unrestricted'
+        # Distinct bytes catch accidental restoration of the other executable.
+        data = (BUILD / 'fixture-game').read_bytes() + b'UNRESTRICTED_FIXTURE'
+        path.write_bytes(data)
+        path.chmod(0o755)
+        return data
+
+    def test_unrestricted_install_uninstall_preserves_regular_patch(self):
+        original = self.add_unrestricted_original()
+        self.assertEqual(self.install().returncode, 0)
+        before = snapshot(self.binary)
+        result = self.install('--unrestricted')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.binary / 'Sam2017_Unrestricted_real').read_bytes(), original)
+        for name, contents in before.items():
+            if name != 'Sam2017_Unrestricted':
+                self.assertEqual(snapshot(self.binary)[name], contents)
+        self.assertEqual(self.install('--unrestricted', '--uninstall').returncode, 0)
+        self.assertEqual(snapshot(self.binary), before)
+
+    def test_regular_uninstall_preserves_unrestricted_patch(self):
+        self.add_unrestricted_original()
+        original = snapshot(self.binary)
+        self.assertEqual(self.install().returncode, 0)
+        self.assertEqual(self.install('--unrestricted').returncode, 0)
+        before = snapshot(self.binary)
+        self.assertEqual(self.install('--uninstall').returncode, 0)
+        for name in ('Sam2017_Unrestricted', 'Sam2017_Unrestricted_real',
+                     'fusionfix-unrestricted.dylib', '.fusionfix-unrestricted-state'):
+            self.assertEqual(snapshot(self.binary)[name], before[name])
+        self.assertEqual(self.install('--unrestricted', '--uninstall').returncode, 0)
+        self.assertEqual(snapshot(self.binary), original)
+
+    def test_unrestricted_repeat_install_preserves_backup(self):
+        self.add_unrestricted_original()
+        self.assertEqual(self.install('--unrestricted').returncode, 0)
+        before = snapshot(self.binary)
+        self.assertNotEqual(self.install('--unrestricted').returncode, 0)
+        self.assertEqual(snapshot(self.binary), before)
+
+    def test_unrestricted_publish_failures_preserve_both_originals(self):
+        self.add_unrestricted_original()
+        self.assertEqual(self.install().returncode, 0)
+        before = snapshot(self.binary)
+        for target in ('library', 'wrapper', 'state'):
+            with self.subTest(target=target):
+                result = self.install('--unrestricted', FAIL_MOVE=target)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('original executable restored', result.stderr)
+                self.assertEqual(snapshot(self.binary), before)
+
+    def test_unrestricted_wrapper_uses_matching_original_and_arguments(self):
+        wrapper = self.binary / 'Sam2017_Unrestricted'
+        shutil.copy2(REPO / 'Sam2017.wrapper.sh', wrapper)
+        real = self.binary / 'Sam2017_Unrestricted_real'
+        real.write_text('#!' + sys.executable + '\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n')
+        real.chmod(0o755)
+        args = ['mod argument', '$(literal)', 'quote\"\'']
+        result = subprocess.run([str(wrapper), *args], text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), args)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

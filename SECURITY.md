@@ -14,7 +14,7 @@ The installer does not download code or change macOS security settings and refus
 * No code opens a diagnostic file path. The library only writes to existing stderr when `FUSIONFIX_LOG=1`.
 * Zeroing weak references track objects without extending their lifetime. Hook operations use strong local
   snapshots; added view mutations and shared object state are confined to the main thread.
-* Hooks apply only to the installed `Sam2017_real` executable name. The full method set is checked before
+* Hooks apply only to the installed `Sam2017_real` and `Sam2017_Unrestricted_real` executable names. The full method set is checked before
   installation. Rendering counters are atomic and background repairs do not synchronously wait on the UI.
 
 ## Limits

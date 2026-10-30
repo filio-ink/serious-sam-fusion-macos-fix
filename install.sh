@@ -5,6 +5,9 @@ umask 077
 REPO_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd -P)
 GAME_DIR="$HOME/Library/Application Support/Steam/steamapps/common/Serious Sam Fusion 2017"
 ACTION=install
+GAME_EXECUTABLE=Sam2017
+LIBRARY_NAME=fusionfix.dylib
+STATE_NAME=.fusionfix-state
 STAGE=
 LOCK=
 TRANSACTION=0
@@ -43,8 +46,9 @@ cleanup() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --uninstall) ACTION=uninstall; shift ;;
+    --unrestricted) GAME_EXECUTABLE=Sam2017_Unrestricted; LIBRARY_NAME=fusionfix-unrestricted.dylib; STATE_NAME=.fusionfix-unrestricted-state; shift ;;
     --game-dir) [ "$#" -ge 2 ] || fail '--game-dir needs a path'; GAME_DIR=$2; shift 2 ;;
-    -h|--help) echo 'Usage: ./install.sh [--uninstall] [--game-dir GAME_ROOT]'; exit 0 ;;
+    -h|--help) echo 'Usage: ./install.sh [--uninstall] [--unrestricted] [--game-dir GAME_ROOT]'; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
@@ -53,10 +57,10 @@ done
 BIN=$(CDPATH= cd -P "$GAME_DIR/Bin/x64" && pwd -P)
 case "$BIN" in *:*) fail 'the game path must not contain a colon' ;; esac
 [ -w "$BIN" ] || fail 'game directory is not writable'
-EXECUTABLE="$BIN/Sam2017"
-BACKUP="$BIN/Sam2017_real"
-LIBRARY="$BIN/fusionfix.dylib"
-STATE="$BIN/.fusionfix-state"
+EXECUTABLE="$BIN/$GAME_EXECUTABLE"
+BACKUP="${EXECUTABLE}_real"
+LIBRARY="$BIN/$LIBRARY_NAME"
+STATE="$BIN/$STATE_NAME"
 LOCK_PATH="$BIN/.fusionfix-lock"
 mkdir "$LOCK_PATH" 2>/dev/null || fail 'another operation is active (or .fusionfix-lock needs inspection)'
 LOCK=$LOCK_PATH
@@ -85,13 +89,13 @@ if [ "$ACTION" = uninstall ]; then
   exit 0
 fi
 
-absent "$BACKUP" || fail 'Sam2017_real already exists; uninstall first. The backup has not been changed.'
-absent "$LIBRARY" || fail 'fusionfix.dylib already exists; inspect the previous installation first'
+absent "$BACKUP" || fail "${GAME_EXECUTABLE}_real already exists; uninstall first. The backup has not been changed."
+absent "$LIBRARY" || fail "$LIBRARY_NAME already exists; inspect the previous installation first"
 absent "$STATE" || fail 'installation state already exists; inspect the previous installation first'
-plain_file "$EXECUTABLE" && [ -x "$EXECUTABLE" ] || fail 'Sam2017 must be a regular executable, not a symbolic link'
+plain_file "$EXECUTABLE" && [ -x "$EXECUTABLE" ] || fail "$GAME_EXECUTABLE must be a regular executable, not a symbolic link"
 case "$(file -b "$EXECUTABLE")" in
   *Mach-O*executable*x86_64*) ;;
-  *) fail 'Sam2017 must be the original x86_64 Mach-O executable' ;;
+  *) fail "$GAME_EXECUTABLE must be the original x86_64 Mach-O executable" ;;
 esac
 for source in fusionfix.m Sam2017.wrapper.sh build.sh SHA256SUMS; do
   plain_file "$REPO_DIR/$source" || fail "missing or symbolic-linked source file: $source"

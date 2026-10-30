@@ -51,6 +51,11 @@ static void drainMainQueue(void) {
 
 int main(void) {
     @autoreleasepool {
+        assert(isGameExecutable("Sam2017_real"));
+        assert(isGameExecutable("Sam2017_Unrestricted_real"));
+        assert(!isGameExecutable("Sam2017_Unrestricted"));
+        assert(!isGameExecutable("helper-Sam2017_real"));
+        assert(!isGameExecutable(NULL));
         orig_enterFS = stub_enter;
         orig_exitFS = stub_exit;
         orig_setLayer = stub_setLayer;
