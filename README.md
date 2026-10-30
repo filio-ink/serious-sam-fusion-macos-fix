@@ -134,6 +134,23 @@ window over the top safe area, so the picture is not cut off at the bottom and t
 the top strip. Set `FUSIONFIX_NO_NOTCH=1` in the launch environment if you prefer AppKit's safe-area behaviour, or simply pick
 a 16:10 mode such as 3024x1890.
 
+## Mods / unrestricted launch
+
+Steam launches mods with the separate `Sam2017_Unrestricted` executable. Patching only `Sam2017` does
+not cover that launch path. From the same reviewed checkout, install its independent patch:
+
+```sh
+./install.sh --unrestricted
+# Add --game-dir '/path/to/Serious Sam Fusion 2017' for a custom library.
+```
+
+This preserves `Sam2017_Unrestricted_real`, installs `fusionfix-unrestricted.dylib`, and records
+`.fusionfix-unrestricted-state`. An existing regular-mode installation is left intact. To remove only
+the mods-mode patch, use `./install.sh --unrestricted --uninstall`. Each mode has its own backup and
+library, so either can be uninstalled without breaking the other. Mods, Workshop packages and saves
+are not modified. This repairs the graphics compatibility layer; it does not establish compatibility
+between individual mods or between modded and unmodded saves.
+
 ## Uninstall
 
 From the saved source checkout:

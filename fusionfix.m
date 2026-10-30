@@ -26,6 +26,10 @@ static bool enabled(const char *name) {
     const char *value = getenv(name);
     return value && strcmp(value, "1") == 0;
 }
+static bool isGameExecutable(const char *name) {
+    return name && (strcmp(name, "Sam2017_real") == 0 ||
+                    strcmp(name, "Sam2017_Unrestricted_real") == 0);
+}
 static void LOG(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void LOG(const char *fmt, ...) {
     if (!gLogging) return;
@@ -172,7 +176,7 @@ static IMP hook(Class cls, SEL selector, IMP replacement) {
 #ifndef FUSIONFIX_TESTING
 __attribute__((constructor)) static void fusionfix_init(void) {
     // DYLD variables propagate to child processes; don't alter helper applications.
-    if (strcmp(getprogname(), "Sam2017_real") != 0) return;
+    if (!isGameExecutable(getprogname())) return;
     gLogging = enabled("FUSIONFIX_LOG");
     const char *scale = getenv("FUSIONFIX_SCALE");
     if (scale) {
